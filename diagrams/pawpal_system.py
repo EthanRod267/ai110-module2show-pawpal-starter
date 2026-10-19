@@ -1,28 +1,69 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date as Date
+from datetime import date as Date, datetime, time as Time, timedelta
+from enum import IntEnum
+from uuid import uuid4
+
+
+class Priority(IntEnum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
 
 
 @dataclass
+# TimeWindow is the earliest start and latest end for a task.
+class TimeWindow:
+    earliest: Time | None = None
+    latest: Time | None = None
+
+
+@dataclass
+# Task class represents a task with a unique id, duration, priority, frequency, optional time window, completion status, and its pet.
 class Task:
     title: str
     duration_minutes: int
-    priority: int
-    time_constraint: str = ""
+    priority: Priority
+    frequency: str = "daily"
+    time_window: TimeWindow | None = None
     completed: bool = False
+    pet: Pet | None = None
+    id: str = field(default_factory=lambda: uuid4().hex)
 
     def edit(
         self,
         title: str | None = None,
         duration_minutes: int | None = None,
-        priority: int | None = None,
-        time_constraint: str | None = None,
+        priority: Priority | None = None,
+        time_window: TimeWindow | None = None,
+        frequency: str | None = None,
     ) -> None:
-        pass
+        """Update any provided fields, validating duration and priority."""
+        if title is not None:
+            self.title = title
+        if duration_minutes is not None:
+            if duration_minutes <= 0:
+                raise ValueError("duration_minutes must be positive")
+            self.duration_minutes = duration_minutes
+        if priority is not None:
+            self.priority = Priority(priority)
+        if time_window is not None:
+            self.time_window = time_window
+        if frequency is not None:
+            self.frequency = frequency
+
+    def mark_complete(self) -> None:
+        """Mark this task as done."""
+        self.completed = True
+
+    def mark_incomplete(self) -> None:
+        """Mark this task as not done."""
+        self.completed = False
 
 
 @dataclass
+# Pet class represents a pet with its details and associated tasks.
 class Pet:
     name: str
     species: str
@@ -33,19 +74,38 @@ class Pet:
     def set_info(
         self, name: str, species: str, age: int, special_needs: str
     ) -> None:
-        pass
+        """Replace this pet's basic details."""
+        self.name = name
+        self.species = species
+        self.age = age
+        self.special_needs = special_needs
 
     def add_task(self, task: Task) -> None:
-        pass
+        """Attach a task to this pet and link it back to the pet."""
+        # Link the task back to this pet so the scheduler knows whose task it is.
+        task.pet = self
+        self.tasks.append(task)
 
-    def edit_task(self, title: str, updates: dict) -> None:
-        pass
+    def get_task(self, task_id: str) -> Task:
+        """Return the task with the given id, or raise KeyError."""
+        for task in self.tasks:
+            if task.id == task_id:
+                return task
+        raise KeyError(f"No task with id {task_id} for {self.name}")
 
-    def remove_task(self, title: str) -> None:
-        pass
+    def edit_task(self, task_id: str, updates: dict) -> None:
+        """Apply a dict of field updates to the task with the given id."""
+        self.get_task(task_id).edit(**updates)
+
+    def remove_task(self, task_id: str) -> None:
+        """Detach the task with the given id from this pet."""
+        task = self.get_task(task_id)
+        self.tasks.remove(task)
+        task.pet = None
 
 
 @dataclass
+# Owner class represents the pet owner with their details, preferences, and associated pets.
 class Owner:
     name: str
     available_minutes: int
@@ -55,25 +115,132 @@ class Owner:
     def set_info(
         self, name: str, available_minutes: int, preferences: list[str]
     ) -> None:
-        pass
+        """Replace the owner's basic details and preferences."""
+        self.name = name
+        self.available_minutes = available_minutes
+        self.preferences = preferences
 
     def add_pet(self, pet: Pet) -> None:
-        pass
+        """Add a pet to this owner."""
+        self.pets.append(pet)
+
+    def get_all_tasks(self) -> list[Task]:
+        """Return every task across all of this owner's pets."""
+        # Flatten every pet's task list into one list; this is the scheduler's single entry point.
+        return [task for pet in self.pets for task in pet.tasks]
 
 
 @dataclass
+# ScheduledItem is a task placed at a start/end time, with its reason and per-day completion.
+class ScheduledItem:
+    task: Task
+    start_time: Time
+    end_time: Time
+    reason: str = ""
+    completed: bool = False
+
+
+def _add_minutes(t: Time, minutes: int) -> Time:
+    """Return the time that is the given number of minutes after t."""
+    return (datetime.combine(Date.min, t) + timedelta(minutes=minutes)).time()
+
+
+@dataclass
+# DailySchedule is the plan for one date; the time budget comes from the owner (single source of truth).
 class DailySchedule:
     date: Date
-    time_budget: int
-    scheduled_tasks: list[Task] = field(default_factory=list)
-    skipped_tasks: list[Task] = field(default_factory=list)
-    reasoning: dict[str, str] = field(default_factory=dict)
+    owner: Owner
+    items: list[ScheduledItem] = field(default_factory=list)
+    skipped: list[tuple[Task, str]] = field(default_factory=list)
 
-    def generate_plan(self, owner: Owner) -> None:
-        pass
+    @property
+    def time_budget(self) -> int:
+        """Minutes available for the day, taken from the owner."""
+        return self.owner.available_minutes
+
+    def generate_plan(self, day_start: Time) -> None:
+        """Build the day's schedule starting at day_start, recording skipped tasks."""
+        self.items = []
+        self.skipped = []
+
+        # 1. Retrieve: pull every pet's tasks through the owner, not from a single pet.
+        pending = [t for t in self.owner.get_all_tasks() if not t.completed]
+
+        # 2. Select: highest priority first, shorter tasks break ties, until the budget runs out.
+        by_priority = sorted(pending, key=lambda t: (-t.priority, t.duration_minutes))
+        selected: list[Task] = []
+        minutes_left = self.time_budget
+        for task in by_priority:
+            if task.duration_minutes <= minutes_left:
+                selected.append(task)
+                minutes_left -= task.duration_minutes
+            else:
+                self.skipped.append(
+                    (task, f"not enough time left ({minutes_left} min remaining)")
+                )
+
+        # 3. Order: at each free slot, run the highest-priority task whose window has opened.
+        def earliest(t: Task) -> Time:
+            if t.time_window and t.time_window.earliest:
+                return max(t.time_window.earliest, day_start)
+            return day_start
+
+        cursor = day_start
+        remaining = list(selected)
+        while remaining:
+            ready = [t for t in remaining if earliest(t) <= cursor]
+            if ready:
+                task = max(ready, key=lambda t: (t.priority, -t.duration_minutes))
+            else:
+                task = min(remaining, key=lambda t: (earliest(t), -t.priority))
+            remaining.remove(task)
+            start = max(cursor, earliest(task))
+            end = _add_minutes(start, task.duration_minutes)
+            window = task.time_window
+            if window and window.latest and end > window.latest:
+                self.skipped.append(
+                    (task, f"could not finish before {window.latest:%H:%M}")
+                )
+                continue
+            self.items.append(
+                ScheduledItem(task, start, end, reason=self._reason_for(task, start))
+            )
+            cursor = end
+
+    def _reason_for(self, task: Task, start: Time) -> str:
+        """Explain why a task was scheduled at the given start time."""
+        reason = f"{task.priority.name.lower()} priority"
+        window = task.time_window
+        if window and window.earliest and start == window.earliest:
+            reason += f", earliest allowed start is {window.earliest:%H:%M}"
+        return reason
 
     def display_plan(self) -> str:
-        pass
+        """Return the schedule as a readable multi-line string."""
+        if not self.items:
+            return f"No tasks scheduled for {self.date:%A, %b %d}."
+        lines = [f"Plan for {self.owner.name} on {self.date:%A, %b %d}:"]
+        for item in self.items:
+            pet = item.task.pet.name if item.task.pet else "unassigned"
+            check = "x" if item.completed or item.task.completed else " "
+            lines.append(
+                f"  [{check}] {item.start_time:%H:%M}-{item.end_time:%H:%M}  "
+                f"{item.task.title} ({pet}, {item.task.duration_minutes} min) "
+                f"[{item.task.priority.name}]"
+            )
+        used = sum(i.task.duration_minutes for i in self.items)
+        lines.append(f"  Time used: {used}/{self.time_budget} min")
+        return "\n".join(lines)
 
     def explain_reasoning(self) -> str:
-        pass
+        """Return why each task was scheduled or skipped."""
+        lines = ["Why this plan:"]
+        for item in self.items:
+            lines.append(
+                f"  - {item.task.title} at {item.start_time:%H:%M}: {item.reason}"
+            )
+        for task, why in self.skipped:
+            lines.append(f"  - Skipped {task.title}: {why}")
+        if len(lines) == 1:
+            lines.append("  - No tasks to schedule.")
+        return "\n".join(lines)

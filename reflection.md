@@ -5,7 +5,10 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
-- What classes did you include, and what responsibilities did you assign to each?
+Info class: petInfo, ownerInfo
+taskCreation class: duration, priority
+schedule class: constraints, priorities, timing, day, week ,month
+- What classes did you include, and what responsibilities did you assign to each? - Task class represents a task with its title, duration, priority, time constraint, and completion status. Pet class represents a pet with its details and associated tasks. Owner class represents the pet owner with their details, preferences, and associated pets. DailySchedule class represents the daily schedule with its date, time budget, scheduled and skipped tasks, and reasoning for the plan.
 
 **b. Design changes**
 

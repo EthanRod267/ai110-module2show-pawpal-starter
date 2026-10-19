@@ -1,0 +1,46 @@
+classDiagram
+    class Owner {
+        +str name
+        +int available_minutes
+        +list~str~ preferences
+        +list~Pet~ pets
+        +set_info(name, available_minutes, preferences) void
+        +add_pet(pet) void
+    }
+
+    class Pet {
+        +str name
+        +str species
+        +int age
+        +str special_needs
+        +list~Task~ tasks
+        +set_info(name, species, age, special_needs) void
+        +add_task(task) void
+        +edit_task(title, updates) void
+        +remove_task(title) void
+    }
+
+    class Task {
+        +str title
+        +int duration_minutes
+        +int priority
+        +str time_constraint
+        +bool completed
+        +edit(title, duration_minutes, priority, time_constraint) void
+    }
+
+    class DailySchedule {
+        +date date
+        +int time_budget
+        +list~Task~ scheduled_tasks
+        +list~Task~ skipped_tasks
+        +dict~str, str~ reasoning
+        +generate_plan(owner) void
+        +display_plan() str
+        +explain_reasoning() str
+    }
+
+    Owner "1" o-- "1..*" Pet : owns
+    Pet "1" *-- "0..*" Task : has
+    DailySchedule ..> Owner : reads constraints from
+    DailySchedule "1" o-- "0..*" Task : schedules

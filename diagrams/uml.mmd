@@ -1,15 +1,72 @@
 classDiagram
-    %% Replace the placeholders below with your actual classes, attributes, methods, and relationships.
-    %% Keep this file updated so it matches your final implementation.
-
-    class ClassName {
-        +type attribute
-        +method() returnType
+    class Priority {
+        <<enumeration>>
+        LOW = 1
+        MEDIUM = 2
+        HIGH = 3
     }
 
-    class AnotherClass {
-        +type attribute
-        +method() returnType
+    class TimeWindow {
+        +time earliest
+        +time latest
     }
 
-    ClassName --> AnotherClass : relationship
+    class Owner {
+        +str name
+        +int available_minutes
+        +list~str~ preferences
+        +list~Pet~ pets
+        +set_info(name, available_minutes, preferences) void
+        +add_pet(pet) void
+        +get_all_tasks() list~Task~
+    }
+
+    class Pet {
+        +str name
+        +str species
+        +int age
+        +str special_needs
+        +list~Task~ tasks
+        +set_info(name, species, age, special_needs) void
+        +add_task(task) void
+        +edit_task(task_id, updates) void
+        +remove_task(task_id) void
+    }
+
+    class Task {
+        +str id
+        +str title
+        +int duration_minutes
+        +Priority priority
+        +TimeWindow time_window
+        +Pet pet
+        +edit(title, duration_minutes, priority, time_window) void
+    }
+
+    class ScheduledItem {
+        +Task task
+        +time start_time
+        +time end_time
+        +str reason
+        +bool completed
+    }
+
+    class DailySchedule {
+        +date date
+        +Owner owner
+        +list~ScheduledItem~ items
+        +list~tuple~ skipped
+        +time_budget() int
+        +generate_plan(day_start) void
+        +display_plan() str
+        +explain_reasoning() str
+    }
+
+    Owner "1" o-- "1..*" Pet : owns
+    Pet "1" *-- "0..*" Task : has
+    Task "0..*" --> "1" Pet : belongs to
+    Task --> Priority
+    Task --> "0..1" TimeWindow
+    ScheduledItem "1" --> "1" Task : wraps
+    DailySchedule "1" *-- "0..*" ScheduledItem : contains
+    DailySchedule "1" --> "1" Owner : planned for
