@@ -44,8 +44,25 @@ pip install -r requirements.txt
 
 ## 🖥️ Sample Output
 
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
+==================================================
+Today's Schedule
+==================================================
+Plan for Jordan on Monday, Oct 19:
+  [ ] 07:00-07:30  Morning walk (Mochi, 30 min) [HIGH]
+  [ ] 07:30-07:40  Breakfast (Mochi, 10 min) [HIGH]
+  [ ] 08:00-08:05  Thyroid meds (Luna, 5 min) [HIGH]
+  [ ] 12:00-12:15  Brushing (Luna, 15 min) [MEDIUM]
+  [ ] 16:00-16:20  Fetch in the yard (Mochi, 20 min) [LOW]
+  [ ] 18:00-18:10  Litter box cleaning (Luna, 10 min) [MEDIUM]
+  Time used: 90/120 min
 
+Why this plan:
+  - Morning walk at 07:00: high priority, earliest allowed start is 07:00
+  - Breakfast at 07:30: high priority, earliest allowed start is 07:30
+  - Thyroid meds at 08:00: high priority, earliest allowed start is 08:00
+  - Brushing at 12:00: medium priority, earliest allowed start is 12:00
+  - Fetch in the yard at 16:00: low priority, earliest allowed start is 16:00
+  - Litter box cleaning at 18:00: medium priority, earliest allowed start is 18:00
 ```
 # e.g.:
 # Daily plan for Biscuit (Golden Retriever):
@@ -72,14 +89,52 @@ Sample test output:
 
 ## 📐 Smarter Scheduling
 
-> Fill in once you've implemented scheduling logic.
+All scheduling logic lives in `diagrams/pawpal_system.py`. The scheduler class is `DailySchedule`.
 
 | Feature | Method(s) | Notes |
 |---------|-----------|-------|
-| Task sorting | | e.g., by priority, duration |
-| Filtering | | e.g., skip tasks if time runs out |
-| Conflict handling | | e.g., overlapping time slots |
-| Recurring tasks | | e.g., daily vs. weekly |
+| Task sorting | `DailySchedule.sort_by_time()` | Orders tasks by the earliest start in their time window; tasks with no time go last |
+| Filtering | `Owner.filter_tasks(completed=..., pet_name=...)` | Filter by completion status, pet name, or both |
+| Conflict handling | `DailySchedule.generate_plan()` | Skips tasks that can't fit, can't finish in their window, or would run past midnight, and records why |
+| Recurring tasks | `Task.mark_complete()`, `Task.is_due()` | Daily and weekly tasks get a next due date; tasks that aren't due yet are left off the plan |
+
+### Sorting: `DailySchedule.sort_by_time(tasks=None)`
+
+- Sorts tasks by `task.earliest`, the earliest allowed start in the task's time window.
+- Tasks with no time window go at the end of the list.
+- Returns a new list and leaves the original unchanged. Tasks with the same start time keep their original order.
+- If you don't pass a list, it sorts every task the owner has. You can also pass in a filtered list:
+  `schedule.sort_by_time(owner.filter_tasks(completed=False))`.
+
+### Filtering: `Owner.filter_tasks(completed=None, pet_name=None)`
+
+- `completed=True` returns finished tasks, `completed=False` returns unfinished ones, and `None` returns both.
+- `pet_name` limits the results to one pet. The match ignores capitalization, so `"mochi"` finds `"Mochi"`.
+- The two filters can be combined, for example `owner.filter_tasks(completed=False, pet_name="Luna")`.
+- With no arguments, it returns every task across all pets.
+
+### Conflict handling: `DailySchedule.generate_plan(day_start)`
+
+`generate_plan()` builds the plan in three steps:
+
+1. **Retrieve:** collect every pet's unfinished tasks that are due today.
+2. **Select:** take tasks in priority order (HIGH first, shorter tasks first on ties) until the owner's `available_minutes` runs out.
+3. **Order:** move a time cursor forward from `day_start`. At each free slot, run the highest-priority task whose time window has opened. A heap (`heapq`) holds the ready tasks so the scheduler never has to rescan the whole list.
+
+Two tasks are never booked at the same time, because each task starts when the previous one ends. When a task can't be placed, it is skipped instead of crashing the program. Each skip is recorded in `schedule.skipped` with one of these reasons:
+
+- `not enough time left (N min remaining)`: the time budget is used up.
+- `could not finish before HH:MM`: the task would run past the end of its time window.
+- `would run past midnight`: the task would end after 24:00.
+
+`explain_reasoning()` prints these reasons next to the scheduled tasks.
+
+### Recurring tasks: `Task.mark_complete()` and `Task.is_due(day)`
+
+- Each task has a `frequency` of `"daily"` or `"weekly"`.
+- `mark_complete()` sets `next_due` to tomorrow for a daily task, or one week from today for a weekly task.
+- `is_due(day)` returns `True` when the task has no `next_due` date or when `day` is on or after `next_due`. `generate_plan()` leaves out tasks that aren't due.
+- **Known limitation:** `mark_complete()` also sets `completed = True`, and `generate_plan()` skips completed tasks. As a result, a recurring task won't reappear on its next due date until `mark_incomplete()` is called.
 
 ## 📸 Demo Walkthrough
 
@@ -92,3 +147,12 @@ Describe your app in numbered steps so a reader can follow along without watchin
 5. <!-- Add more steps as needed -->
 
 **Screenshot or video** *(optional)*: <!-- Insert a screenshot or link to a demo video here -->
+
+## Implementation Summary
+Priority: Enum for task priority levels.
+TimeWindow: Represents the earliest start and latest end times for a task.
+Task: Represents a task with details, time window, and completion status.
+Pet: Represents a pet with its details and associated tasks.
+Owner: Represents the pet owner with their details, preferences, and pets.
+ScheduledItem: Represents a task scheduled at a specific time with a reason.
+

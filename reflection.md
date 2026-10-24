@@ -12,16 +12,15 @@ schedule class: constraints, priorities, timing, day, week ,month
 
 **b. Design changes**
 
-- Did your design change during implementation?
+- Did your design change during implementation? - yes
 - If yes, describe at least one change and why you made it.
-
----
+--- the completed variable moved off task onto the new SchduledItem so it can be tracked daily.
 
 ## 2. Scheduling Logic and Tradeoffs
 
 **a. Constraints and priorities**
 
-- What constraints does your scheduler consider (for example: time, priority, preferences)?
+- What constraints does your scheduler consider (for example: time, priority, preferences)? - 
 - How did you decide which constraints mattered most?
 
 **b. Tradeoffs**
@@ -35,8 +34,8 @@ schedule class: constraints, priorities, timing, day, week ,month
 
 **a. How you used AI**
 
-- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
-- What kinds of prompts or questions were most helpful?
+- How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)? - I used the tool to suggest ideas in terms of bottlenecks and debugging/fixing any issues regarding the logic in the code.
+- What kinds of prompts or questions were most helpful? - Mainly what was instructed for the assignment.
 
 **b. Judgment and verification**
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field
 from datetime import date as Date, datetime, time as Time, timedelta
 from enum import IntEnum
@@ -30,6 +31,28 @@ class Task:
     completed: bool = False
     pet: Pet | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
+    next_due: Date | None = None
+
+    @property
+    def earliest(self) -> Time | None:
+        """Earliest allowed start, or None if the task has no window."""
+        return self.time_window.earliest if self.time_window else None
+
+    @property
+    def latest(self) -> Time | None:
+        """Latest allowed end, or None if the task has no window."""
+        return self.time_window.latest if self.time_window else None
+
+    def is_due(self, day: Date) -> bool:
+        """Return True if this task should appear on the given day.
+
+        A task with no next_due date is always due. Otherwise it becomes due
+        again on or after next_due (set by mark_complete for recurring tasks).
+
+        Args:
+            day: The date being scheduled.
+        """
+        return self.next_due is None or day >= self.next_due
 
     def edit(
         self,
@@ -56,6 +79,11 @@ class Task:
     def mark_complete(self) -> None:
         """Mark this task as done."""
         self.completed = True
+        # set next due date (today + 1 day, or + 7 days for weekly instead of a permanent flag)
+        if self.frequency == "daily":
+            self.next_due = datetime.now().date() + timedelta(days=1)
+        elif self.frequency == "weekly":
+            self.next_due = datetime.now().date() + timedelta(days=7)
 
     def mark_incomplete(self) -> None:
         """Mark this task as not done."""
@@ -129,6 +157,30 @@ class Owner:
         # Flatten every pet's task list into one list; this is the scheduler's single entry point.
         return [task for pet in self.pets for task in pet.tasks]
 
+    def filter_tasks(
+        self, completed: bool | None = None, pet_name: str | None = None
+    ) -> list[Task]:
+        """Return tasks matching the given completion status and/or pet name.
+
+        Each filter left as None is not applied, so filter_tasks() returns every
+        task. Pet names match case-insensitively; tasks with no pet never match
+        a pet_name filter. Tasks keep their original pet-then-insertion order.
+
+        Args:
+            completed: True for finished tasks, False for unfinished, None for both.
+            pet_name: Only include tasks belonging to the pet with this name.
+        """
+        # None means "don't filter on this"; pet names match case-insensitively.
+        return [
+            task
+            for task in self.get_all_tasks()
+            if (completed is None or task.completed == completed)
+            and (
+                pet_name is None
+                or (task.pet is not None and task.pet.name.lower() == pet_name.lower())
+            )
+        ]
+
 
 @dataclass
 # ScheduledItem is a task placed at a start/end time, with its reason and per-day completion.
@@ -140,9 +192,17 @@ class ScheduledItem:
     completed: bool = False
 
 
-def _add_minutes(t: Time, minutes: int) -> Time:
-    """Return the time that is the given number of minutes after t."""
-    return (datetime.combine(Date.min, t) + timedelta(minutes=minutes)).time()
+MINUTES_PER_DAY = 24 * 60
+
+
+def _to_minutes(t: Time) -> int:
+    """Return t as minutes since midnight."""
+    return t.hour * 60 + t.minute
+
+
+def _to_time(minutes: int) -> Time:
+    """Return minutes since midnight as a time (must be within the day)."""
+    return Time(minutes // 60, minutes % 60)
 
 
 @dataclass
@@ -159,12 +219,31 @@ class DailySchedule:
         return self.owner.available_minutes
 
     def generate_plan(self, day_start: Time) -> None:
-        """Build the day's schedule starting at day_start, recording skipped tasks."""
+        """Build the day's schedule starting at day_start, recording skipped tasks.
+
+        Runs in three steps:
+          1. Retrieve: every pet's unfinished tasks that are due on self.date.
+          2. Select: greedily take tasks by highest priority (shorter first on
+             ties) until the owner's time budget runs out.
+          3. Order: walk a time cursor forward from day_start; at each free slot,
+             run the highest-priority task whose window has opened (a heap keeps
+             this O(n log n)). If nothing is ready, jump to the next window.
+
+        Tasks that don't fit the budget, can't finish before their window's
+        latest time, or would run past midnight are added to self.skipped with
+        a reason. Replaces any previous self.items and self.skipped.
+
+        Args:
+            day_start: The earliest time any task may begin.
+        """
         self.items = []
         self.skipped = []
 
-        # 1. Retrieve: pull every pet's tasks through the owner, not from a single pet.
-        pending = [t for t in self.owner.get_all_tasks() if not t.completed]
+        # 1. Retrieve: every pet's unfinished tasks that are due on this date.
+        pending = [
+            t for t in self.owner.get_all_tasks()
+            if not t.completed and t.is_due(self.date)
+        ]
 
         # 2. Select: highest priority first, shorter tasks break ties, until the budget runs out.
         by_priority = sorted(pending, key=lambda t: (-t.priority, t.duration_minutes))
@@ -180,39 +259,43 @@ class DailySchedule:
                 )
 
         # 3. Order: at each free slot, run the highest-priority task whose window has opened.
-        def earliest(t: Task) -> Time:
-            if t.time_window and t.time_window.earliest:
-                return max(t.time_window.earliest, day_start)
-            return day_start
+        # Work in minutes since midnight; convert back to Time only for ScheduledItem.
+        start_min = _to_minutes(day_start)
 
-        cursor = day_start
-        remaining = list(selected)
-        while remaining:
-            ready = [t for t in remaining if earliest(t) <= cursor]
-            if ready:
-                task = max(ready, key=lambda t: (t.priority, -t.duration_minutes))
-            else:
-                task = min(remaining, key=lambda t: (earliest(t), -t.priority))
-            remaining.remove(task)
-            start = max(cursor, earliest(task))
-            end = _add_minutes(start, task.duration_minutes)
-            window = task.time_window
-            if window and window.latest and end > window.latest:
-                self.skipped.append(
-                    (task, f"could not finish before {window.latest:%H:%M}")
-                )
+        def opens_at(t: Task) -> int:
+            """Minute the task may start: its window's earliest, but never before day_start."""
+            return max(_to_minutes(t.earliest), start_min) if t.earliest else start_min
+
+        upcoming = sorted(selected, key=opens_at)
+        # Heap of tasks whose window has opened; the index breaks ties so Tasks are never compared.
+        ready: list[tuple[int, int, int, Task]] = []
+        cursor, i = start_min, 0
+        while i < len(upcoming) or ready:
+            if not ready:
+                cursor = max(cursor, opens_at(upcoming[i]))
+            while i < len(upcoming) and opens_at(upcoming[i]) <= cursor:
+                t = upcoming[i]
+                heapq.heappush(ready, (-t.priority, t.duration_minutes, i, t))
+                i += 1
+            task = heapq.heappop(ready)[-1]
+            end = cursor + task.duration_minutes
+            if task.latest and end > _to_minutes(task.latest):
+                self.skipped.append((task, f"could not finish before {task.latest:%H:%M}"))
                 continue
+            if end >= MINUTES_PER_DAY:
+                self.skipped.append((task, "would run past midnight"))
+                continue
+            start = _to_time(cursor)
             self.items.append(
-                ScheduledItem(task, start, end, reason=self._reason_for(task, start))
+                ScheduledItem(task, start, _to_time(end), reason=self._reason_for(task, start))
             )
             cursor = end
 
     def _reason_for(self, task: Task, start: Time) -> str:
         """Explain why a task was scheduled at the given start time."""
         reason = f"{task.priority.name.lower()} priority"
-        window = task.time_window
-        if window and window.earliest and start == window.earliest:
-            reason += f", earliest allowed start is {window.earliest:%H:%M}"
+        if task.earliest and start == task.earliest:
+            reason += f", earliest allowed start is {task.earliest:%H:%M}"
         return reason
 
     def display_plan(self) -> str:
@@ -244,3 +327,17 @@ class DailySchedule:
         if len(lines) == 1:
             lines.append("  - No tasks to schedule.")
         return "\n".join(lines)
+
+    def sort_by_time(self, tasks: list[Task] | None = None) -> list[Task]:
+        """Return tasks ordered by earliest allowed start; tasks with no time go last.
+
+        Returns a new list and leaves the input unchanged. The sort is stable,
+        so tasks with the same start (or no start) keep their original order.
+
+        Args:
+            tasks: Tasks to sort; defaults to every task the owner has.
+        """
+        if tasks is None:
+            tasks = self.owner.get_all_tasks()
+        # Untimed tasks (True) sort after timed ones (False); Time.max avoids comparing None.
+        return sorted(tasks, key=lambda t: (t.earliest is None, t.earliest or Time.max))
